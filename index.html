@@ -13575,6 +13575,94 @@ body { font-size: 16px; line-height: inherit; color: #000; }
   var SAFE_TOP = 62;
   // 공모전 시연용 판 (바깥 설명 패널 없이 앱만, 마이 · 가입 · 연결 화면은 보이지 않음)
   var DEMO = true;
+  // 시연: 말 → 글(/api/stt)과 AI 문장(/api/ai)은 Vercel 서버 함수를 거쳐 OpenAI로. 실패하면 정해 둔 문장으로 넘어간다
+  // APK 안에서는 window.IEOBOM_API에 데모 주소를 넣는다
+  var API_BASE = typeof window !== "undefined" && window.IEOBOM_API || "";
+  async function apiPost(path, body, ms = 15e3) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), ms);
+    try {
+      const r = await fetch(API_BASE + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: ac.signal });
+      return r.ok ? await r.json() : null;
+    } catch (e) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  var aiCall = (task, data) => apiPost("/api/ai", { task, ...data });
+  // 받아쓴 글을 돌려준다. 서버가 안 되면 null, 들렸지만 말이 없으면 ""
+  async function sttBlob(blob) {
+    if (!blob || blob.size < 1200) return "";
+    const b64 = await new Promise((ok) => {
+      const fr = new FileReader();
+      fr.onload = () => ok(String(fr.result).split(",")[1] || "");
+      fr.onerror = () => ok("");
+      fr.readAsDataURL(blob);
+    });
+    if (!b64) return null;
+    const r = await apiPost("/api/stt", { audio: b64, mime: blob.type || "audio/webm" }, 3e4);
+    return r && typeof r.text === "string" ? r.text.trim() : null;
+  }
+  async function openMic() {
+    try {
+      if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return null;
+      return await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    } catch (e) {
+      return null;
+    }
+  }
+  function recordOnce(stream) {
+    const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/aac"].find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || "";
+    let rec;
+    try {
+      rec = new MediaRecorder(stream, mime ? { mimeType: mime } : void 0);
+    } catch (e) {
+      rec = new MediaRecorder(stream);
+    }
+    const parts = [];
+    rec.ondataavailable = (e) => {
+      if (e.data && e.data.size) parts.push(e.data);
+    };
+    const done = new Promise((ok) => {
+      rec.onstop = () => ok(new Blob(parts, { type: rec.mimeType || mime || "audio/webm" }));
+    });
+    rec.start();
+    return { stop: () => {
+      if (rec.state !== "inactive") rec.stop();
+      return done;
+    } };
+  }
+  // 소리 크기(조용한 구간은 받아쓰기에 보내지 않음)
+  function voiceMeter(stream) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      const ctx = new AC();
+      if (ctx.resume) ctx.resume();
+      const an = ctx.createAnalyser();
+      an.fftSize = 1024;
+      ctx.createMediaStreamSource(stream).connect(an);
+      const buf = new Float32Array(an.fftSize);
+      let peak = 0;
+      const id = setInterval(() => {
+        an.getFloatTimeDomainData(buf);
+        let s = 0;
+        for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+        peak = Math.max(peak, Math.sqrt(s / buf.length));
+      }, 100);
+      return { take: () => {
+        const p = peak;
+        peak = 0;
+        return p;
+      }, close: () => {
+        clearInterval(id);
+        if (ctx.close) ctx.close();
+      } };
+    } catch (e) {
+      return null;
+    }
+  }
   function StatusBar() {
     return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { height: SAFE_TOP, flexShrink: 0 } });
   }
@@ -15037,8 +15125,62 @@ body { font-size: 16px; line-height: inherit; color: #000; }
       ] }, a.id))
     ] });
   }
+  // 시연: 통화 중 내 목소리를 5초씩 녹음해 받아쓴다(엄마 목소리는 없음 · 조용한 조각은 보내지 않음). 마이크를 못 쓰면 정해 둔 대화로
+  var CALL_STT = { text: [], pending: [] };
   function CallTranscript({ family, parent, talk, note }) {
     const ref = (0, import_react2.useRef)(null);
+    const [mode, setMode] = (0, import_react2.useState)("wait");
+    const [said, setSaid] = (0, import_react2.useState)([]);
+    (0, import_react2.useEffect)(() => {
+      CALL_STT.text = [];
+      CALL_STT.pending = [];
+      if (!note) return;
+      let alive = true, stream = null, meter = null, cur = null, timer = null, n = 0;
+      const flush = (r, pk) => {
+        const i = n++;
+        CALL_STT.pending.push(r.stop().then((b) => pk > 0.012 ? sttBlob(b) : "").then((x) => {
+          if (!x) return;
+          CALL_STT.text[i] = x;
+          if (alive) setSaid(CALL_STT.text.filter(Boolean));
+        }));
+      };
+      const seg = () => {
+        if (!alive) return;
+        cur = recordOnce(stream);
+        timer = setTimeout(() => {
+          const r = cur, pk = meter ? meter.take() : 1;
+          cur = null;
+          seg();
+          flush(r, pk);
+        }, 5e3);
+      };
+      (async () => {
+        const s = await openMic();
+        if (!alive) {
+          if (s) s.getTracks().forEach((x) => x.stop());
+          return;
+        }
+        if (!s) {
+          setMode("demo");
+          return;
+        }
+        stream = s;
+        meter = voiceMeter(s);
+        setMode("live");
+        seg();
+      })();
+      return () => {
+        alive = false;
+        clearTimeout(timer);
+        const r = cur;
+        cur = null;
+        if (r) flush(r, meter ? meter.take() : 1);
+        (r ? r.stop() : Promise.resolve()).then(() => {
+          if (stream) stream.getTracks().forEach((x) => x.stop());
+          if (meter) meter.close();
+        });
+      };
+    }, [note]);
     const lines = parent ? [
       [1, "이사는 잘 끝났어?"],
       [3, "네, 어제 다 옮겼어요. 사진 보내 드릴게요."],
@@ -15054,17 +15196,17 @@ body { font-size: 16px; line-height: inherit; color: #000; }
       [10, "아, 주말엔 이모네 김장 도와주러 가."],
       [12, "무리하지 마시고 사진 보내 주세요!"]
     ];
-    const shown = lines.filter(([at]) => talk >= at);
+    const shown = mode === "demo" ? lines.filter(([at]) => talk >= at).map(([, x]) => x) : said;
     (0, import_react2.useEffect)(() => {
       if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
     }, [shown.length]);
     if (!note) return J("div", { style: { flex: 1, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 20 }, children: J("p", { style: { fontSize: 13, color: "rgba(255,255,255,0.55)" }, children: "녹음하지 않는 통화라 받아쓰지 않아요." }) });
-    return JS("div", { "data-call-transcript": shown.length, style: { flex: 1, minHeight: 0, width: "100%", display: "flex", flexDirection: "column", margin: "14px 0 18px", textAlign: "left" }, children: [
+    return JS("div", { "data-call-transcript": mode + ":" + shown.length, style: { flex: 1, minHeight: 0, width: "100%", display: "flex", flexDirection: "column", margin: "14px 0 18px", textAlign: "left" }, children: [
       JS("p", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "rgba(255,255,255,0.75)", marginBottom: 8 }, children: [
         J("span", { className: "eb-waiting", style: { width: 8, height: 8, borderRadius: 4, background: "#F0644B" } }),
-        "받아쓰는 중 \xB7 나만 보여요"
+        mode === "wait" ? "마이크를 켜는 중…" : "받아쓰는 중 \xB7 나만 보여요"
       ] }),
-      J("div", { ref, style: { flex: 1, minHeight: 0, overflowY: "auto", maskImage: "linear-gradient(to bottom, transparent 0, #000 36px)", WebkitMaskImage: "linear-gradient(to bottom, transparent 0, #000 36px)" }, children: J("p", { style: { fontSize: 17, lineHeight: 1.7, color: "rgba(255,255,255,0.92)", paddingTop: 30 }, children: shown.length ? shown.map(([at, text], i) => (0, import_jsx_runtime.jsx)("span", { style: { color: i === shown.length - 1 ? "#FFFFFF" : "rgba(255,255,255,0.72)" }, children: text + " " }, at)) : J("span", { style: { color: "rgba(255,255,255,0.5)" }, children: "말하면 여기에 글로 나와요." }) }) })
+      J("div", { ref, style: { flex: 1, minHeight: 0, overflowY: "auto", maskImage: "linear-gradient(to bottom, transparent 0, #000 36px)", WebkitMaskImage: "linear-gradient(to bottom, transparent 0, #000 36px)" }, children: J("p", { style: { fontSize: 17, lineHeight: 1.7, color: "rgba(255,255,255,0.92)", paddingTop: 30 }, children: shown.length ? shown.map((text, i) => (0, import_jsx_runtime.jsx)("span", { style: { color: i === shown.length - 1 ? "#FFFFFF" : "rgba(255,255,255,0.72)" }, children: text + " " }, i)) : J("span", { style: { color: "rgba(255,255,255,0.5)" }, children: mode === "live" ? (parent ? "자녀" : family) + "와 이야기하듯 말해 보세요. 5초쯤 뒤에 여기에 글로 나와요." : "말하면 여기에 글로 나와요." }) }) })
     ] });
   }
   function CallingOverlay({ family, asks = [], parent = false, answered = false, outcome = "answer", micOff = false, partnerMicOff = false, note = false, onMicOn, onEnd }) {
@@ -15217,12 +15359,35 @@ body { font-size: 16px; line-height: inherit; color: #000; }
   function useVoice(init, demo, onText, max = 0) {
     const [state, setState] = (0, import_react2.useState)(init);
     const [sec, setSec] = (0, import_react2.useState)(0);
-    const finish = (auto) => {
+    const mic = (0, import_react2.useRef)(null);
+    const release = () => {
+      const m = mic.current;
+      mic.current = null;
+      if (m) m.rec.stop().then(() => m.stream.getTracks().forEach((x) => x.stop()));
+      return m;
+    };
+    (0, import_react2.useEffect)(() => () => {
+      release();
+    }, []);
+    const finish = async (auto) => {
       setState("busy");
-      setTimeout(() => {
-        onText(demo);
+      const m = mic.current;
+      mic.current = null;
+      if (!m) {
+        // 마이크를 못 쓰는 기기: 정해 둔 문장으로 (시연이 멈추지 않게)
+        setTimeout(() => {
+          onText(demo);
+          setState(auto ? "auto" : "done");
+        }, 700);
+        return;
+      }
+      const blob = await m.rec.stop();
+      m.stream.getTracks().forEach((x) => x.stop());
+      const text = await sttBlob(blob);
+      if (text) {
+        onText(text);
         setState(auto ? "auto" : "done");
-      }, 700);
+      } else setState("fail");
     };
     (0, import_react2.useEffect)(() => {
       if (state !== "rec") return;
@@ -15231,15 +15396,20 @@ body { font-size: 16px; line-height: inherit; color: #000; }
       return () => clearInterval(t);
     }, [state]);
     (0, import_react2.useEffect)(() => {
-      if (state === "rec" && max && sec >= max) finish(true);
+      if (state === "rec" && sec >= (max || 60)) finish(true);
     }, [sec, state]);
     const toggle = () => {
       if (state === "busy") return;
       if (state !== "rec") {
-        withMic(() => setState("rec"));
+        withMic(async () => {
+          const s = await openMic();
+          mic.current = s ? { stream: s, rec: recordOnce(s) } : null;
+          setState("rec");
+        });
         return;
       }
       if (sec < 2) {
+        release();
         setState("fail");
         return;
       }
@@ -16275,6 +16445,11 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     const [leave, setLeave] = (0, import_react2.useState)(() => pick("me.leave", false));
     const [text, setText] = (0, import_react2.useState)(() => leave ? parent ? family + " 이사 잘 끝났대." : "무릎 검사 결과 괜찮으시대." : init);
     const [mood, setMood] = (0, import_react2.useState)(initMood);
+    const wasDrafting = (0, import_react2.useRef)(drafting);
+    (0, import_react2.useEffect)(() => {
+      if (wasDrafting.current && !drafting && draft0) setText(draft0.text);
+      wasDrafting.current = drafting;
+    }, [drafting]);
     // 39차 7회: 다음 통화 때 여쭤볼 이야기는 여러 개 고른다
     const [qPicks, setQPicks] = (0, import_react2.useState)([]);
     const [askDel, setAskDel] = (0, import_react2.useState)(false);
@@ -17891,10 +18066,23 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     const t = byTopic[topic] || (topic ? [topic + " 이야기 더 들려주세요.", topic + " 이야기 더 들려줘."] : ["요즘은 어떻게 지내세요?", "요즘은 어떻게 지내?"]);
     return to === "parent" ? t[1] : t[0];
   }
+  var AI_NEWS = {};
   function addNews(n, raw = n.text) {
     const to = n.by === "parent" ? "child" : "parent";
-    NEWS.unshift({ ...n, id: n.id || "n" + Date.now(), q: newsQ(raw, n.topic, to) });
+    const item = { ...n, id: n.id || "n" + Date.now(), q: newsQ(raw, n.topic, to) };
+    NEWS.unshift(item);
     dataChanged();
+    // 시연: 글이 있으면 AI가 물어볼 이야기를 다시 쓴다 (사진 · 영상은 AI에 보내지 않음)
+    if (!DEMO || !raw || !raw.trim() || /^(사진|영상)을 보냈어요$/.test(raw.trim())) return;
+    const g = n.gid || item.id;
+    AI_NEWS[g] = AI_NEWS[g] || aiCall("newsAsk", { text: raw, to });
+    AI_NEWS[g].then((r) => {
+      if (r && typeof r.q === "string" && r.q.trim()) {
+        item.q = r.q.trim();
+        item.ai = true;
+        dataChanged();
+      }
+    });
   }
   function deleteNews(n) {
     const i = NEWS.indexOf(n);
@@ -17959,10 +18147,24 @@ body { font-size: 16px; line-height: inherit; color: #000; }
   function startDraft(fam, who) {
     const d = { text: who === "parent" ? CALL_DRAFT_DEMO.parent.split(callName("아영")).join(callName(kidOfData(fam))) : CALL_DRAFT_DEMO[who], key: TODAY_KEY, fresh: true };
     setDraft(fam, who, d);
-    setTimeout(() => {
+    const t0 = Date.now();
+    const done = () => setTimeout(() => {
       d.fresh = false;
       dataChanged();
-    }, 2000);
+    }, Math.max(0, 2e3 - (Date.now() - t0)));
+    // 시연: 통화 중 받아쓴 글(마지막 조각까지 기다림)로 AI가 초안을 쓴다. 받아쓴 게 없거나 실패하면 정해 둔 초안
+    setTimeout(() => {
+      Promise.all(CALL_STT.pending).then(() => {
+        const said = CALL_STT.text.filter(Boolean).join(" ").trim();
+        return said.length >= 6 ? aiCall("callDraft", { transcript: said, who, partner: who === "parent" ? callName(kidOfData(fam)) : fam }) : null;
+      }).then((r) => {
+        if (r && r.draft) {
+          d.text = r.draft;
+          d.ai = true;
+        }
+        done();
+      });
+    }, 150);
   }
   var CALL_DRAFT_DEMO = {
     child: "엄마 무릎 검사 결과는 괜찮으시대요. 다음 달에 한 번 더 검사받으신대요.\n주말에 이모네 김장 도와주러 가신대요.",
@@ -18135,11 +18337,15 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     delete rec.aiBlocked;
     delete rec.aiFailed;
     dataChanged();
-    setTimeout(() => {
-      rec.aiCands = makeAiQs(rec.text, who);
-      rec.aiPending = false;
-      dataChanged();
-    }, 1200);
+    const t0 = Date.now();
+    aiCall("memoAsks", { memo: rec.text, who }).then((r) => {
+      const asks = r && Array.isArray(r.asks) && r.asks.length ? r.asks : makeAiQs(rec.text, who);
+      setTimeout(() => {
+        rec.aiCands = asks;
+        rec.aiPending = false;
+        dataChanged();
+      }, Math.max(0, 1200 - (Date.now() - t0)));
+    });
   }
   function chooseAsk(rec, q) {
     const qs = Array.isArray(q) ? q : q ? [q] : [];
@@ -18160,11 +18366,15 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     delete rec.aiBlocked;
     delete rec.aiFailed;
     dataChanged();
-    setTimeout(() => {
-      rec.aiQ = makeAiQ(rec.text, who);
-      rec.aiPending = false;
-      dataChanged();
-    }, 1800);
+    const t0 = Date.now();
+    aiCall("memoAsks", { memo: rec.text, who }).then((r) => {
+      const q = r && Array.isArray(r.asks) && r.asks[0] || makeAiQ(rec.text, who);
+      setTimeout(() => {
+        rec.aiQ = q;
+        rec.aiPending = false;
+        dataChanged();
+      }, Math.max(0, 1800 - (Date.now() - t0)));
+    });
   }
   function saveMemoRec(family, who, key, text, mood) {
     const today = key === dayKey(CAL_TODAY.y, CAL_TODAY.m, CAL_TODAY.d);
