@@ -59,14 +59,17 @@ export default async function handler(req, res) {
   if (!make) return res.status(400).json({ error: "task" });
   const p = make(body);
   if (!p.need) return res.status(400).json({ error: "empty" });
+  const model = process.env.OPENAI_TEXT_MODEL || "gpt-6-luna";
   const out = await openai("/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: process.env.OPENAI_TEXT_MODEL || "gpt-4o-mini",
+      model,
       messages: [{ role: "system", content: p.system }, { role: "user", content: p.user }],
       response_format: { type: "json_object" },
-      max_completion_tokens: 600
+      max_completion_tokens: 600,
+      // 추론 모델(gpt-5 이후 · o 계열)은 추론을 꺼서 빠르고 싸게
+      ...(/^(gpt-([5-9]|\d\d)|o\d)/.test(model) ? { reasoning_effort: "none" } : {})
     })
   });
   const content = out && out.choices && out.choices[0] && out.choices[0].message && out.choices[0].message.content;

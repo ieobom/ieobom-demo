@@ -15,7 +15,7 @@ AI나 인터넷이 안 되면 앱은 정해 둔 문장으로 넘어간다.
 ## 환경 변수 (Vercel)
 
 - `OPENAI_API_KEY` — 필수. Vercel 프로젝트 설정에서 넣는다. 코드와 저장소에는 두지 않는다.
-- `OPENAI_TEXT_MODEL` — 선택. 글 만들기 모델 (없으면 `gpt-4o-mini`)
+- `OPENAI_TEXT_MODEL` — 선택. 글 만들기 모델 (없으면 `gpt-6-luna`, 추론 끔)
 - `OPENAI_STT_MODEL` — 선택. 음성 인식 모델 (없으면 `gpt-4o-mini-transcribe`)
 
 데모 주소는 누구나 열 수 있으니 OpenAI 대시보드에서 이 키의 사용 한도도 걸어 둔다.
