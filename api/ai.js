@@ -1,4 +1,4 @@
-// 글 만들기: 근황 → 물어볼 이야기 · 받아쓴 통화 → 통화 메모 초안 · 메모 → 다음 통화 이야기
+// 글 만들기: 근황 → 물어볼 이야기 · 받아쓴 통화 → 통화 메모 초안 · 메모 → 다음 통화 이야기 · 함께 답한 질문 → 가족마다 물어볼 이야기
 import { guard, openai } from "./_lib.js";
 
 const TOPICS = ["일·학교", "건강", "취미·운동", "먹은 것", "다녀온 곳", "가족·친구", "그 밖"];
@@ -49,7 +49,23 @@ const TASKS = {
     ].join("\n"),
     user: "메모: " + clip(memo, 600),
     pick: (o) => ({ asks: (Array.isArray(o.asks) ? o.asks : []).map((x) => clip(x, 60)).filter(Boolean).slice(0, 2) })
-  })
+  }),
+  // answers = 서로 열린 가족 답 [{ name, text }] · who = 묻는 사람 (parent | child)
+  answerAsks: ({ question, answers, who }) => {
+    const list = (Array.isArray(answers) ? answers : []).slice(0, 4).map((a) => ({ name: clip(a && a.name, 10), text: clip(a && a.text, 200) })).filter((a) => a.name && a.text);
+    return {
+      need: list.length ? "ok" : "",
+      system: [
+        "너는 가족 소통 앱 '이어봄'의 도우미다. 가족이 같은 질문에 답한 글을 보고, 답한 사람마다 다음 통화 때 그 사람에게 꺼낼 질문을 2개씩 만든다.",
+        "- 그 사람 답 속 구체적인 내용(장소 · 사람 · 일 · 물건)을 짚어 더 듣고 싶게 묻는다. 두 질문은 서로 다른 것을 묻는다.",
+        "- " + tone(who === "parent" ? "parent" : "child"),
+        "- 한 문장, 25자 안팎, 물음표로 끝난다. " + RULES,
+        'JSON으로만 답한다: {"asks": [{"name": "답한 사람", "qs": ["질문1", "질문2"]}]}'
+      ].join("\n"),
+      user: "질문: " + clip(question, 100) + "\n" + list.map((a) => a.name + "의 답: " + a.text).join("\n"),
+      pick: (o) => ({ asks: (Array.isArray(o.asks) ? o.asks : []).map((a) => ({ name: clip(a && a.name, 10), qs: (Array.isArray(a && a.qs) ? a.qs : []).map((x) => clip(x, 60)).filter(Boolean).slice(0, 2) })).filter((a) => a.name && a.qs.length) })
+    };
+  }
 };
 
 export default async function handler(req, res) {

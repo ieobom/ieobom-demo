@@ -13471,7 +13471,7 @@ body { font-size: 16px; line-height: inherit; color: #000; }
       { key: "home", label: "홈", ico: (c) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(IcoHome, { color: c }) },
       { key: "archive", label: "기록", ico: (c) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(IcoNote, { color: c }) },
       { key: "settings", label: "마이", ico: (c) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(IcoUser, { color: c }) }
-    ].filter((x) => !DEMO || x.key !== "settings");
+    ];
     return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { borderTop: "1px solid " + C.border, background: C.white, display: "flex", alignItems: "stretch", paddingBottom: 24, flexShrink: 0 }, children: tabs.map((t) => {
       const on = active === t.key;
       const color = on ? C.primary : C.textTertiary;
@@ -14841,6 +14841,66 @@ body { font-size: 16px; line-height: inherit; color: #000; }
   };
   var QA_TEXT = { 엄마: ANS_CHILD.family, 아빠: "낚시 다니던 저수지 둑길.\n해 질 녘이 제일 좋았지.", 아영: ANS_PARENT.family, 민준: "학교 앞 오락실.\n동전 모아서 매일 갔어요." };
   var qaText = (k) => QA_TEXT[k] || "어릴 때 살던 골목.";
+  // 시연: 서로의 답이 열리면 AI가 가족 답마다 통화 때 물어볼 이야기 2개를 만들고, 고른 만큼 그 가족의 여쭤볼 이야기에 담는다. AI가 안 되면 아래 문장
+  var QA_FOLLOW = {
+    엄마: ["그 떡볶이집은 지금도 있어요?", "친구들이랑 떡볶이 먹고 뭐 하고 노셨어요?"],
+    아빠: ["그 저수지는 누구랑 낚시하러 다니셨어요?", "해 질 녘 둑길, 지금도 가 보고 싶으세요?"],
+    아영: ["문방구 뽑기에서 뭐가 제일 갖고 싶었어?", "그 문방구 아직 있는지 알아?"],
+    민준: ["오락실에서 제일 잘하던 게임은 뭐였어?", "오락실 갈 동전은 어떻게 모았어?"]
+  };
+  var QA_ASKS = {};
+  var QA_PICKED = {};
+  function qaAsksFor(who, members, mine) {
+    if (QA_ASKS[who]) return QA_ASKS[who];
+    const st = QA_ASKS[who] = { open: false, cands: null };
+    const fb = (m) => QA_FOLLOW[m.key] || (who === "parent" ? ["그때 이야기 좀 더 들려줄래?", "요즘도 그때 생각나?"] : ["그때 이야기 좀 더 들려주실래요?", "요즘도 그때 생각나세요?"]);
+    const t0 = Date.now();
+    aiCall("answerAsks", { question: who === "parent" ? Q_PARENT : Q_CHILD, answers: members.map((m) => ({ name: m.name, text: qaText(m.key) })), mine, who }).then((r) => {
+      const got = r && Array.isArray(r.asks) ? r.asks : [];
+      setTimeout(() => {
+        st.cands = members.map((m) => {
+          const a = got.find((x) => x && x.name === m.name);
+          const qs = a && Array.isArray(a.qs) ? a.qs.filter((q) => typeof q === "string" && q.trim()).slice(0, 2) : [];
+          return { m, qs: qs.length ? qs : fb(m) };
+        });
+        dataChanged();
+      }, Math.max(0, 1200 - (Date.now() - t0)));
+    });
+    return st;
+  }
+  function saveQaPicks(who, picked) {
+    picked.forEach(({ m, q }) => {
+      const k = m.data + ":" + who;
+      (QA_PICKED[k] = QA_PICKED[k] || []).push({ id: "qa:" + m.key + ":" + q, text: q, note: "함께 답한 질문 \xB7 " + dateLabel(TODAY_KEY) + " \xB7 " + m.name + " 답: " + qaText(m.key).replace(/\n/g, " "), ref: { pinned: true } });
+    });
+    delete QA_ASKS[who];
+    dataChanged();
+  }
+  function QaAskPick({ st, parent, onDone }) {
+    const [sel, setSel] = (0, import_react2.useState)([]);
+    const to = (n) => parent ? n + "에게" : n + "께";
+    const id = (c, i) => c.m.key + "|" + i;
+    const toggle = (k) => setSel((v) => v.includes(k) ? v.filter((x) => x !== k) : [...v, k]);
+    const picked = () => (st.cands || []).flatMap((c) => c.qs.map((q, i) => ({ m: c.m, q, k: id(c, i) }))).filter((x) => sel.includes(x.k));
+    return JS("div", { "data-qa-pick": st.cands ? sel.length : "wait", children: [
+      J("h3", { style: { ...qTitle, marginBottom: 6 }, children: "통화 때 " + (parent ? "물어볼까요?" : "여쭤볼까요?") }),
+      J("p", { style: { ...secSub, marginBottom: 14 }, children: "가족 답을 보고 AI가 골랐어요. 고른 이야기는 그 가족과 통화할 때 보여요." }),
+      !st.cands ? J("div", { className: "eb-waiting", style: { background: WELL, borderRadius: R.sm, padding: "22px 16px", textAlign: "center", fontSize: 15, color: C.textSub, marginBottom: 18 }, children: "이야기를 고르고 있어요…" }) : J("div", { style: { display: "flex", flexDirection: "column", gap: 14, marginBottom: 18 }, children: st.cands.map((c) => JS("div", { children: [
+        J("p", { style: { fontSize: 13, fontWeight: 700, color: C.accent2Deep, marginBottom: 2 }, children: to(c.m.name) }),
+        c.qs.map((q, i) => {
+          const on = sel.includes(id(c, i));
+          return JS("button", { onClick: () => toggle(id(c, i)), "aria-pressed": on, style: { width: "100%", display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", background: "none", border: "none", borderTop: i ? "1px solid " + C.border : "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }, children: [
+            J("span", { style: { width: 24, height: 24, borderRadius: 12, border: "2px solid " + (on ? C.primary : C.border), background: on ? C.primary : C.white, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", marginTop: 1, boxSizing: "border-box" }, children: on && J("svg", { width: "12", height: "12", viewBox: "0 0 12 12", fill: "none", children: J("path", { d: "M2 6.2l2.8 2.8L10 3.6", stroke: "white", strokeWidth: "1.9", strokeLinecap: "round", strokeLinejoin: "round" }) }) }),
+            J("span", { style: { flex: 1, fontSize: 16, color: C.text, lineHeight: 1.5 }, children: q })
+          ] }, i);
+        })
+      ] }, c.m.key)) }),
+      JS("div", { style: { display: "flex", flexDirection: "column", gap: 4 }, children: [
+        J(BtnPrimary, { disabled: !sel.length, onClick: () => onDone(picked()), children: sel.length ? sel.length + "개 담기" : "담을 이야기를 골라요" }),
+        J(BtnGhost, { onClick: () => onDone([]), style: { textAlign: "center", width: "100%", fontSize: 16, color: C.textSub }, children: "괜찮아요" })
+      ] })
+    ] });
+  }
   var Q_LAST = "요즘 새로 배워 보고 싶은 게 있어요?";
   var LAST_ANS = { parent: "동네 문화센터 서예. 한번 해 보고 싶어.", child: "수영이요. 주말반을 알아보고 있어요." };
   var qTitle = { fontSize: 19, fontWeight: 800, color: C.text, letterSpacing: "-0.04em", lineHeight: 1.42, textWrap: "balance" };
@@ -14877,7 +14937,7 @@ body { font-size: 16px; line-height: inherit; color: #000; }
       J("span", { style: { fontSize: 13, fontWeight: x.on ? 700 : 600, color: x.on ? C.text : C.textTertiary, maxWidth: 50, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: x.name })
     ] }, x.key)) });
   }
-  function QuestionCard({ family, dataFamily, who, qs, mine, focus, onAnswer, onChoose, onOpenedOk, onReceivedOk, onQuestions, onEditNext }) {
+  function QuestionCard({ family, dataFamily, who, qs, mine, flash, focus, onAnswer, onChoose, onOpenedOk, onReceivedOk, onQuestions, onEditNext }) {
     useDataVersion();
     const parent = who === "parent";
     const rel = relKeyOf(who, family);
@@ -14887,7 +14947,22 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     const answered = members.filter((m) => QA_DONE.has(m.key));
     const waiting = members.filter((m) => !QA_DONE.has(m.key));
     const names = (l) => l.map((m) => m.name).join(" \xB7 ");
-    const right = toDo ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tag, { children: "AI가 만든 질문" }) : qs === "choose" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { fontSize: 13, color: C.textTertiary }, children: "어제 온 질문이에요" }) : qs === "opened" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tag, { tone: "family", children: "서로의 답이 열렸어요" }) : qs === "received" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tag, { tone: "family", children: "먼저 온 답" }) : null;
+    // 답이 열리면 추천을 미리 만들어 둔다 (확인했어요를 누르면 바로 보이게)
+    (0, import_react2.useEffect)(() => {
+      if (qs === "opened" && members.length) qaAsksFor(who, members, mine);
+    }, [qs]);
+    const picking = qs === "opened" && !!(QA_ASKS[who] && QA_ASKS[who].open);
+    const openPick = () => {
+      if (!members.length) return onOpenedOk();
+      qaAsksFor(who, members, mine).open = true;
+      dataChanged();
+    };
+    const donePick = (picked) => {
+      saveQaPicks(who, picked);
+      if (picked.length && flash) flash(withWa([...new Set(picked.map((x) => x.m.name))].join(" \xB7 ")) + " 통화할 때 보여요");
+      onOpenedOk();
+    };
+    const right = picking ? J(Tag, { children: "AI" }) : toDo ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tag, { children: "AI가 만든 질문" }) : qs === "choose" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { fontSize: 13, color: C.textTertiary }, children: "어제 온 질문이에요" }) : qs === "opened" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tag, { tone: "family", children: "서로의 답이 열렸어요" }) : qs === "received" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Tag, { tone: "family", children: "먼저 온 답" }) : null;
     const n1 = nextQ(rel);
     const doneLine = theirMadeQ(rel) === "first" ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
       n1.date,
@@ -14976,13 +15051,14 @@ body { font-size: 16px; line-height: inherit; color: #000; }
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Main, { onClick: onReceivedOk, children: "확인했어요" }),
         qLink
       ] }),
-      qs === "opened" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+      picking && J(QaAskPick, { st: QA_ASKS[who], parent, onDone: donePick }),
+      qs === "opened" && !picking && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { style: { ...qTitle, marginBottom: 14 }, children: parent ? Q_PARENT : Q_CHILD }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }, children: [
           ...members.map((m) => (0, import_jsx_runtime.jsx)(AnswerWell, { who: m.name, text: qaText(m.key), tone: "family" }, m.key)),
           (0, import_jsx_runtime.jsx)(AnswerWell, { who: "나", text: mine, tone: "me" }, "me")
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(BtnSecondary, { onClick: onOpenedOk, children: "확인했어요" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(BtnSecondary, { onClick: openPick, children: "확인했어요" }),
         qLink
       ] }),
       qs === "done" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
@@ -16063,7 +16139,7 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     }, []);
     const linkDays = fams.length ? Math.max(...fams.map((f) => daysSince(sinceOf(f.data, who)) || 0)) : 0;
     const linkName = fams.length === 1 ? fams[0].name : "가족";
-    const qCard = { k: "q", el: J(QuestionCard, { family: partner, dataFamily, who, qs, mine, onEditNext: onMakeQuestion, focus: qs === "new" || qs === "choose" || qs === "received", onAnswer, onChoose, onOpenedOk: () => setQs("done"), onReceivedOk: () => {
+    const qCard = { k: "q", el: J(QuestionCard, { family: partner, dataFamily, who, qs, mine, flash, onEditNext: onMakeQuestion, focus: qs === "new" || qs === "choose" || qs === "received", onAnswer, onChoose, onOpenedOk: () => setQs("done"), onReceivedOk: () => {
       receiveFirst(parent, dataFamily);
       setQs("new");
     }, onQuestions }) };
@@ -16072,8 +16148,8 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     const cards = solo ? [] : [
       ...joinCard ? [joinCard] : [],
       ...missed ? [{ k: "missed", el: J(MissedCard, { family: partner, onCall: onCallScreen, onOk: onMissedOk }) }] : [],
-      // 시연에선 답할 질문을 맨 앞에 (시연 순서: 질문 → 근황 → 통화)
-      ...DEMO && qTodo ? [qCard] : [],
+      // 시연에선 질문 카드를 맨 앞에 — 답을 보낸 뒤에도 내 답이 바로 보이게 (시연 순서: 질문 → 근황 → 통화)
+      ...DEMO && qs !== "done" ? [qCard] : [],
       ...now ? [{ k: "timing", el: J(TimingCard, { members: nowFams, who, onOpen: () => {
         setFamily(nowFams[0].key);
         onCallScreen();
@@ -16083,7 +16159,7 @@ body { font-size: 16px; line-height: inherit; color: #000; }
         setFamily(draftAt.f.key);
         onDraft();
       }, onDelete: () => onDraftDelete(draftAt.f.data) }) }] : [],
-      ...qTodo ? [] : [qCard]
+      ...(DEMO ? qs === "done" : !qTodo) ? [qCard] : []
     ];
     useSync("home.cards", cards.map((c) => c.k).join(","));
     const tiles = [
@@ -18130,7 +18206,9 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     const answer = (lastQ == null ? void 0 : lastQ.rec.follow) && !lastQ.rec.askedOn && talkLive(lastQ.rec) ? [{ id: lastQ.id + ":follow", text: lastQ.rec.follow[who], src: "answer", when: lastQ.key, note: "함께 답한 질문 \xB7 " + lastQ.date, ref: lastQ.rec }] : [];
     // 날씨 이야기는 계절마다 하나 (계절이 바뀌면 새로)
     const season = !seasonAsk(relKey).askedOn && talkLive(seasonAsk(relKey)) && !avoided(SEASON.topic, relKey) ? [{ id: "season", text: SEASON[who], src: "season", when: SEASON.key, note: "요즘 날씨 \xB7 " + dateLabel(SEASON.key), ref: seasonAsk(relKey) }] : [];
-    return talkOrder([...got.map(newsTalk), ...memo2, ...answer, ...season]);
+    // 시연: 함께 답한 질문에서 직접 고른 이야기 (근황에서 직접 넣은 것처럼 맨 앞 · 여쭤볼 때까지)
+    const picked = (QA_PICKED[fam + ":" + who] || []).filter((x) => !x.ref.askedOn && !x.ref.dropped).map((x) => ({ id: x.id, text: x.text, src: "answer", when: TODAY_KEY, note: x.note, ref: x.ref }));
+    return talkOrder([...got.map(newsTalk), ...memo2, ...picked, ...answer, ...season]);
   }
   var LOGGED_MEMOS = { 엄마: {}, 아빠: {} };
   // 39차: 통화 메모 초안 — 두 사람 모두 켠 통화만 녹음 → 글로 바꾸고 녹음 지움(늦어도 1시간) → AI가 쓴 초안. 저장 전까지만 있고 3일 뒤 지운다
@@ -18181,6 +18259,7 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     NEWS.splice(0, NEWS.length, ...NEWS_BASE.map((n) => ({ ...n, photos: [...n.photos] })));
     Object.keys(SEASON_ASK).forEach((k) => delete SEASON_ASK[k]);
     Object.keys(CALL_DRAFTS).forEach((k) => delete CALL_DRAFTS[k]);
+    [QA_ASKS, QA_PICKED].forEach((o) => Object.keys(o).forEach((k) => delete o[k]));
   }
   function clearData() {
     for (const k of Object.keys(CONTACT_DAYS)) delete CONTACT_DAYS[k];
@@ -18188,6 +18267,7 @@ body { font-size: 16px; line-height: inherit; color: #000; }
     NEWS.splice(0, NEWS.length);
     Object.keys(SEASON_ASK).forEach((k) => delete SEASON_ASK[k]);
     Object.keys(CALL_DRAFTS).forEach((k) => delete CALL_DRAFTS[k]);
+    [QA_ASKS, QA_PICKED].forEach((o) => Object.keys(o).forEach((k) => delete o[k]));
     dataChanged();
   }
   function addRecord(family, rec, key = dayKey(CAL_TODAY.y, CAL_TODAY.m, CAL_TODAY.d)) {
@@ -19198,7 +19278,7 @@ body { font-size: 16px; line-height: inherit; color: #000; }
         setToastUndo(null);
       }, undo ? 5e3 : 3200);
     }
-    const onTab = (t) => go(t);
+    const onTab = (t) => DEMO && t === "settings" ? flash("데모는 핵심 기능만 담았어요. 마이 화면은 함께 낸 시안에서 볼 수 있어요.") : go(t);
     function startCode() {
       queue("onb.mode", "inviteCode");
       queue("onb.step", "code");
